@@ -105,3 +105,37 @@ The wall gradient from the PINN-predicted temperature field was used to compute 
 ## Backup Topic
 
 Thermal contact resistance PINN remains the backup topic. It is safer but has lower presentation impact than the flat-plate convection PINN.
+
+## Development Workflow Memory
+
+Current working assumption:
+
+- Code development, cleanup, documentation, and small smoke tests are done on the MacBook.
+- Final or heavy training runs are done on the desktop PC with an RTX 5060 Ti 16GB GPU.
+- GitHub is used as the bridge between machines: push work from the MacBook, then pull updates on the desktop before running CUDA training.
+
+GPU/Colab decision:
+
+- Use the local RTX 5060 Ti 16GB desktop environment as the main training environment.
+- Use Colab only as a backup, sharing/demo environment, or temporary fallback if the local CUDA setup is unavailable.
+- The local GPU is preferred because it avoids Colab runtime limits, random GPU allocation, session interruptions, and repeated setup friction.
+
+Implementation habits to preserve:
+
+- Write device-agnostic PyTorch code so the same scripts can run on MacBook and desktop:
+
+```python
+device = torch.device(
+    "cuda" if torch.cuda.is_available()
+    else "mps" if torch.backends.mps.is_available()
+    else "cpu"
+)
+```
+
+- Avoid absolute local paths such as `/Users/.../AI coding/...` in project code.
+- Keep project paths relative to the repository, for example `data/heat_transfer_experiments.csv`.
+- Keep heavy generated files out of Git, including checkpoints, run logs, large arrays, and intermediate outputs.
+- Track source code, configuration files, small reference data, final plots, reports, and environment documentation.
+- Maintain `requirements.txt`, `environment.yml`, or README setup notes so the desktop CUDA environment can be recreated cleanly.
+- For MacBook tests, use small epochs, reduced collocation points, and fast smoke-test settings.
+- For desktop runs, use CUDA-oriented settings and the RTX 5060 Ti 16GB as the main training target.
