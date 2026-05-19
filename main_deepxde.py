@@ -346,7 +346,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # DeepXDE에서는 보통 epoch 대신 iterations라는 이름을 쓴다.
     # 예: python main_deepxde.py --iterations 10000
-    parser.add_argument("--iterations", type=int, default=5000)
+    parser.add_argument("--iterations", type=int, default=200000)
 
     # Adam optimizer learning rate
     parser.add_argument("--lr", type=float, default=1.0e-3)
