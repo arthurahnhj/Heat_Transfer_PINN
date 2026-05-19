@@ -1,0 +1,730 @@
+% !TEX program = xelatex
+\documentclass[11pt]{article}
+
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{kotex}
+\usepackage{listings}
+
+\lstdefinestyle{codestyle}{
+    basicstyle=\ttfamily\small,
+    breaklines=true,
+    frame=single,
+    columns=fullflexible,
+    backgroundcolor=\color{gray!5}
+}
+\lstset{style=codestyle}
+
+\title{Phase 1 Code Guide\\
+\large Robot Joint Motor Housing Inverse PINN}
+\author{안형준}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{문서 목적}
+
+이 문서는 \texttt{Phase1/Phase1\_Proposal\_안형준.pdf}와 \texttt{main.py}를 같이 보면서 코드 흐름을 이해하기 위한 해설 문서다.
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+역할 & 파일 \\
+\midrule
+프로젝트 물리 모델 기준 & \texttt{Phase1/Phase1\_Proposal\_안형준.pdf} \\
+현재 PINN 코드 & \texttt{main.py} \\
+프로젝트 기준 메모 & \texttt{BASELINE.md} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{프로젝트 한 줄 요약}
+
+제안서의 물리 모델은 로봇 관절 모터 하우징을 축방향 1D 비정상 열전달 문제로 단순화한 inverse PINN이다.
+
+\[
+\text{input} = (X,\tau), \qquad
+\text{output} = \theta(X,\tau)
+\]
+
+PINN은 무차원 온도장 \(\theta(X,\tau)\)를 예측하고, 동시에 inverse parameter인 \(\beta\)와 \(S\)를 학습한다. 학습 후에는 \(\beta\)와 \(S\)를 실제 물리 파라미터 \(h\), \(q_0\)로 변환한다.
+
+\[
+\beta \rightarrow h, \qquad S \rightarrow q_0
+\]
+
+\section{제안서 식과 코드의 연결}
+
+제안서의 차원 있는 지배 방정식은 다음과 같다.
+
+\begin{equation}
+\rho c_p \frac{\partial T}{\partial t}
+=
+k \frac{\partial^2 T}{\partial x^2}
+-
+\frac{hP}{A}(T - T_\infty)
++
+q_0 I(t)^2 g(x)
+\end{equation}
+
+각 항의 의미는 다음과 같다.
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+항 & 의미 \\
+\midrule
+\(\rho c_p \frac{\partial T}{\partial t}\) & 시간에 따른 열 저장 \\
+\(k \frac{\partial^2 T}{\partial x^2}\) & 축방향 전도 \\
+\(-\frac{hP}{A}(T-T_\infty)\) & 외부 표면 대류 냉각 \\
+\(q_0 I(t)^2 g(x)\) & 내부 Joule heating \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+제안서에서는 학습 안정성을 위해 다음 무차원 변수를 사용한다.
+
+\begin{equation}
+X = \frac{x}{L},
+\qquad
+\tau = \frac{\alpha t}{L^2},
+\qquad
+\theta = \frac{T - T_\infty}{\Delta T_{\mathrm{ref}}},
+\qquad
+\alpha = \frac{k}{\rho c_p}
+\end{equation}
+
+전류도 무차원화한다.
+
+\begin{equation}
+i(\tau) = \frac{I(t)}{I_{\mathrm{ref}}}
+\end{equation}
+
+그러면 무차원 지배 방정식은 다음 형태가 된다.
+
+\begin{equation}
+\frac{\partial \theta}{\partial \tau}
+=
+\frac{\partial^2 \theta}{\partial X^2}
+-
+\beta \theta
++
+S i(\tau)^2 g(X)
+\end{equation}
+
+여기서
+
+\begin{equation}
+\beta =
+\frac{hPL^2}{kA}
+\end{equation}
+
+\begin{equation}
+S =
+\frac{q_0 I_{\mathrm{ref}}^2 L^2}
+{k\Delta T_{\mathrm{ref}}}
+\end{equation}
+
+코드에서는 모든 항을 왼쪽으로 넘겨 residual 형태로 계산한다.
+
+\begin{equation}
+f_{\mathrm{PDE}}
+=
+\theta_\tau
+-
+\theta_{XX}
++
+\beta \theta
+-
+S i(\tau)^2 g(X)
+\end{equation}
+
+PINN의 목표는 이 residual을 0에 가깝게 만드는 것이다.
+
+\begin{equation}
+f_{\mathrm{PDE}} \rightarrow 0
+\end{equation}
+
+코드 위치는 다음 함수다.
+
+\begin{lstlisting}[language=Python]
+def pde_residual(model, xtau):
+\end{lstlisting}
+
+\section{사용자가 정하는 입력값}
+
+코드의 첫 번째 큰 구역은 사용자가 직접 정하는 값들을 모아둔 곳이다.
+
+\begin{lstlisting}[language=Python]
+# 1. User-defined inputs
+\end{lstlisting}
+
+\subsection{형상값}
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+코드 변수 & 제안서 의미 & 현재 값 \\
+\midrule
+\texttt{L} & 모터 하우징 길이 & \(0.15~\mathrm{m}\) \\
+\texttt{R\_OUTER} & 외반지름 & \(0.04~\mathrm{m}\) \\
+\texttt{R\_INNER} & 내반지름 & \(0.025~\mathrm{m}\) \\
+\texttt{X0} & Gaussian heat source 중심 & \(0.30\) \\
+\texttt{SIGMA\_X} & Gaussian heat source 폭 & \(0.10\) \\
+\texttt{SENSOR\_X} & sparse sensor 위치 & \(0.25, 0.55, 0.85\) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+제안서에서 열원 중심과 폭은 다음과 같이 설정했다.
+
+\[
+x_0 = 0.3L,
+\qquad
+\sigma = 0.1L
+\]
+
+무차원 좌표 \(X=x/L\)를 쓰면 코드에서는 다음처럼 쓴다.
+
+\[
+X_0 = 0.30,
+\qquad
+\sigma_X = 0.10
+\]
+
+\subsection{재료 물성치}
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+코드 변수 & 제안서 의미 & 현재 값 \\
+\midrule
+\texttt{RHO} & 밀도 \(\rho\) & \(2700~\mathrm{kg/m^3}\) \\
+\texttt{CP} & 비열 \(c_p\) & \(900~\mathrm{J/(kg\cdot K)}\) \\
+\texttt{K} & 열전도율 \(k\) & \(167~\mathrm{W/(m\cdot K)}\) \\
+\texttt{T\_INF} & 주변 공기 온도 \(T_\infty\) & \(25^\circ\mathrm{C}\) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{무차원화 기준값}
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+코드 변수 & 의미 & 현재 값 \\
+\midrule
+\texttt{DELTA\_T\_REF} & 온도 기준값 & \(50^\circ\mathrm{C}\) \\
+\texttt{I\_REF} & 전류 기준값 & \(5.0~\mathrm{A}\) \\
+\texttt{T\_FINAL} & 최종 해석 시간 & \(1200~\mathrm{s}\) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Synthetic data용 true parameter}
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+코드 변수 & 의미 & 현재 값 \\
+\midrule
+\texttt{H\_TRUE} & synthetic data 생성용 실제 \(h\) & \(40~\mathrm{W/(m^2\cdot K)}\) \\
+\texttt{Q0\_TRUE} & synthetic data 생성용 실제 \(q_0\) & \(8.0\times10^4~\mathrm{W/(m^3 A^2)}\) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+이 두 값은 inverse PINN이 나중에 맞혀야 할 정답 역할을 한다.
+
+\section{자동 계산값}
+
+입력값에서 자동 계산되는 값들은 다음 구역에 있다.
+
+\begin{lstlisting}[language=Python]
+# 2. Derived values
+\end{lstlisting}
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+코드 변수 & 공식 & 의미 \\
+\midrule
+\texttt{ALPHA} & \(\alpha = k/(\rho c_p)\) & 열확산계수 \\
+\texttt{AREA} & \(A=\pi(R_o^2-R_i^2)\) & 축방향 전도 단면적 \\
+\texttt{PERIMETER} & \(P=2\pi R_o\) & 외부 대류 둘레 \\
+\texttt{TAU\_FINAL} & \(\tau_f=\alpha t_f/L^2\) & 무차원 최종 시간 \\
+\texttt{BETA\_TRUE} & \(\beta_{\mathrm{true}}=h_{\mathrm{true}}PL^2/(kA)\) & synthetic data용 true \(\beta\) \\
+\texttt{S\_TRUE} & \(S_{\mathrm{true}}=q_{0,\mathrm{true}}I_{\mathrm{ref}}^2L^2/(k\Delta T_{\mathrm{ref}})\) & synthetic data용 true \(S\) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+여기 값들은 보통 직접 수정하지 않고, 앞의 입력값을 바꿔서 간접적으로 바꾼다.
+
+\section{차원/무차원 변환 함수}
+
+\subsection{시간 변환}
+
+제안서의 시간 무차원화는 다음과 같다.
+
+\begin{equation}
+\tau = \frac{\alpha t}{L^2}
+\end{equation}
+
+코드 함수는 다음 두 개다.
+
+\begin{lstlisting}[language=Python]
+tau_from_time(t_seconds)
+time_from_tau(tau)
+\end{lstlisting}
+
+\subsection{\texorpdfstring{\(h\)와 \(\beta\) 변환}{h and beta conversion}}
+
+\begin{equation}
+\beta = \frac{hPL^2}{kA}
+\end{equation}
+
+\begin{equation}
+h = \frac{\beta kA}{PL^2}
+\end{equation}
+
+코드 함수
+
+\begin{lstlisting}[language=Python]
+beta_from_physical_h(h_value)
+physical_h_from_beta(beta)
+\end{lstlisting}
+
+\subsection{\texorpdfstring{\(q_0\)와 \(S\) 변환}{q0 and S conversion}}
+
+\begin{equation}
+S =
+\frac{q_0 I_{\mathrm{ref}}^2 L^2}
+{k\Delta T_{\mathrm{ref}}}
+\end{equation}
+
+\begin{equation}
+q_0 =
+\frac{S k \Delta T_{\mathrm{ref}}}
+{I_{\mathrm{ref}}^2 L^2}
+\end{equation}
+
+코드 함수
+
+\begin{lstlisting}[language=Python]
+s_from_physical_q0(q0_value)
+physical_q0_from_s(s_value)
+\end{lstlisting}
+
+\section{Gaussian heat source}
+
+제안서의 열원 분포는 Gaussian이다.
+
+\begin{equation}
+g(X)
+=
+\exp\left[
+-
+\frac{(X-X_0)^2}{2\sigma_X^2}
+\right]
+\end{equation}
+
+코드 위치
+
+\begin{lstlisting}[language=Python]
+def gaussian_heat_source(x):
+\end{lstlisting}
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+위치 & 의미 \\
+\midrule
+\(X=0.30\) 근처 & winding 근처, 열 발생 큼 \\
+\(X=0.85\) 근처 & heat source에서 멀어서 열 발생 작음 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Current profile}
+
+코드 위치
+
+\begin{lstlisting}[language=Python]
+def current_profile(tau):
+\end{lstlisting}
+
+현재 사용자가 지정한 전류 입력은 두 번 켜고 끄는 duty cycle이다.
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+구간 & 상태 & 의미 \\
+\midrule
+\(0 \le t < 300~\mathrm{s}\) & ON & Joule heating 작동 \\
+\(300 \le t < 600~\mathrm{s}\) & OFF & 냉각 중심 \\
+\(600 \le t < 900~\mathrm{s}\) & ON & Joule heating 재작동 \\
+\(900 \le t \le 1200~\mathrm{s}\) & OFF & 냉각 중심 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+inverse problem에서 이 구조가 중요한 이유는 다음과 같다.
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+구간 & 물리 의미 & 추정에 도움 되는 값 \\
+\midrule
+current ON & Joule heating 항 존재 & \(q_0\), \(S\) \\
+current OFF & Joule heating 항 사라짐 & \(h\), \(\beta\) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Synthetic sensor data}
+
+코드 위치
+
+\begin{lstlisting}[language=Python]
+def synthetic_theta_no_conduction(x, tau):
+def make_synthetic_sensor_data(device):
+\end{lstlisting}
+
+현재 synthetic data는 먼저 단순한 local ODE로 생성한다.
+
+\begin{equation}
+\frac{d\theta}{d\tau}
+=
+-\beta_{\mathrm{true}}\theta
++
+S_{\mathrm{true}}i(\tau)^2g(X)
+\end{equation}
+
+즉, 현재 synthetic data에는 축방향 전도항 \(\theta_{XX}\)가 아직 없다.
+
+\begin{equation}
+\theta_{XX} \quad \text{not included yet}
+\end{equation}
+
+현재 이렇게 둔 이유는 다음과 같다.
+
+\begin{enumerate}[leftmargin=2em]
+\item inverse PINN 구조가 돌아가는지 먼저 확인
+\item sensor data loss 연결 확인
+\item 나중에 full PDE finite difference solver로 교체
+\end{enumerate}
+
+현재 sensor data 개수는 다음과 같다.
+
+\[
+3~\text{sensors} \times 41~\text{time points}
+=
+123~\text{points}
+\]
+
+\section{신경망 구조}
+
+코드 위치
+
+\begin{lstlisting}[language=Python]
+class MotorHousingPINN(nn.Module):
+\end{lstlisting}
+
+신경망 입력과 출력은 다음과 같다.
+
+\[
+(X,\tau) \longrightarrow \theta(X,\tau)
+\]
+
+현재 네트워크 구조
+
+\begin{lstlisting}
+Linear(2 -> 32)
+Tanh
+Linear(32 -> 32)
+Tanh
+Linear(32 -> 32)
+Tanh
+Linear(32 -> 1)
+\end{lstlisting}
+
+모델 내부에는 trainable parameter 두 개가 들어 있다.
+
+\begin{lstlisting}[language=Python]
+self.raw_beta
+self.raw_s
+\end{lstlisting}
+
+코드는 바로 \(\beta\), \(S\)를 학습하지 않고 raw parameter를 학습한 뒤 softplus를 통과시킨다.
+
+\begin{equation}
+\beta = \mathrm{softplus}(\texttt{raw\_beta})
+\end{equation}
+
+\begin{equation}
+S = \mathrm{softplus}(\texttt{raw\_s})
+\end{equation}
+
+이렇게 하면 \(\beta\)와 \(S\)가 항상 양수가 된다. 물리적으로 \(h\), \(q_0\), \(\beta\), \(S\)가 음수면 이상하기 때문에 이 처리를 둔다.
+
+\section{점 샘플링}
+
+PINN은 전체 격자를 고정해서 쓰기보다, 여러 종류의 점을 뽑아서 loss를 계산한다.
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+함수 & 뽑는 점 & 제안서 loss와 연결 \\
+\midrule
+\texttt{sample\_collocation\_points()} & PDE 검사점 & \(L_{\mathrm{PDE}}\) \\
+\texttt{sample\_initial\_points()} & \(\tau=0\) 점 & \(L_{\mathrm{IC}}\) \\
+\texttt{sample\_boundary\_points()} & \(X=0, X=1\) 점 & \(L_{\mathrm{BC}}\) \\
+\texttt{make\_synthetic\_sensor\_data()} & 센서 위치와 시간점 & \(L_{\mathrm{data}}\) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{자동미분}
+
+코드 위치
+
+\begin{lstlisting}[language=Python]
+def gradient(output, inputs):
+\end{lstlisting}
+
+PINN에서는 신경망 출력 \(\theta\)를 직접 미분해서 PDE residual을 만든다.
+
+필요한 미분값은 다음과 같다.
+
+\begin{equation}
+\theta_\tau =
+\frac{\partial \theta}{\partial \tau}
+\end{equation}
+
+\begin{equation}
+\theta_X =
+\frac{\partial \theta}{\partial X}
+\end{equation}
+
+\begin{equation}
+\theta_{XX} =
+\frac{\partial^2 \theta}{\partial X^2}
+\end{equation}
+
+코드에서 이 값들을 계산하는 부분
+
+\begin{lstlisting}[language=Python]
+grad_theta = gradient(theta, xtau)
+theta_x = grad_theta[:, 0:1]
+theta_tau = grad_theta[:, 1:2]
+
+grad_theta_x = gradient(theta_x, xtau)
+theta_xx = grad_theta_x[:, 0:1]
+\end{lstlisting}
+
+\section{Loss 함수}
+
+\subsection{PDE loss}
+
+코드 위치
+
+\begin{lstlisting}[language=Python]
+pde_residual()
+pde_loss()
+\end{lstlisting}
+
+제안서의 PDE loss는 다음과 같은 형태다.
+
+\begin{equation}
+L_{\mathrm{PDE}}
+=
+\frac{1}{N_f}
+\sum_{i=1}^{N_f}
+f_{\mathrm{PDE}}(X_i,\tau_i)^2
+\end{equation}
+
+\subsection{Initial condition loss}
+
+제안서의 초기조건
+
+\begin{equation}
+T(x,0)=T_\infty
+\end{equation}
+
+무차원 온도에서는 다음과 같다.
+
+\begin{equation}
+\theta(X,0)=0
+\end{equation}
+
+코드 위치
+
+\begin{lstlisting}[language=Python]
+initial_condition_loss()
+\end{lstlisting}
+
+\subsection{Boundary condition loss}
+
+제안서의 단열 경계조건
+
+\begin{equation}
+\frac{\partial T}{\partial x}(0,t)=0
+\end{equation}
+
+\begin{equation}
+\frac{\partial T}{\partial x}(L,t)=0
+\end{equation}
+
+무차원 좌표에서는 다음과 같다.
+
+\begin{equation}
+\frac{\partial \theta}{\partial X}(0,\tau)=0
+\end{equation}
+
+\begin{equation}
+\frac{\partial \theta}{\partial X}(1,\tau)=0
+\end{equation}
+
+코드 위치
+
+\begin{lstlisting}[language=Python]
+boundary_condition_loss()
+\end{lstlisting}
+
+\subsection{Sensor data loss}
+
+제안서의 sparse sensor data loss는 다음 형태다.
+
+\begin{equation}
+L_{\mathrm{data}}
+=
+\frac{1}{N_s}
+\sum_{i=1}^{N_s}
+\left[
+T_\phi(x_i,t_i)-T_{\mathrm{sensor},i}
+\right]^2
+\end{equation}
+
+현재 코드는 무차원 온도 \(\theta\)를 쓰므로 다음 형태로 계산한다.
+
+\begin{equation}
+L_{\mathrm{data}}
+=
+\frac{1}{N_s}
+\sum_{i=1}^{N_s}
+\left[
+\theta_\phi(X_i,\tau_i)-\theta_{\mathrm{sensor},i}
+\right]^2
+\end{equation}
+
+코드 위치
+
+\begin{lstlisting}[language=Python]
+sensor_data_loss()
+\end{lstlisting}
+
+\section{main 함수}
+
+코드 위치
+
+\begin{lstlisting}[language=Python]
+def main():
+\end{lstlisting}
+
+현재 \texttt{main()}은 학습을 오래 돌리는 함수가 아니라 smoke test용이다.
+
+현재 역할
+
+\begin{enumerate}[leftmargin=2em]
+\item device 선택
+\item 모델 생성
+\item PDE loss 계산
+\item IC loss 계산
+\item BC loss 계산
+\item synthetic sensor data loss 계산
+\item \(\beta\), \(S\)를 \(h\), \(q_0\)로 변환해서 출력
+\item 코드 구조가 깨지지 않는지 확인
+\end{enumerate}
+
+출력값 의미
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+출력 & 의미 \\
+\midrule
+\texttt{tau\_final} & \(1200~\mathrm{s}\)를 무차원 시간으로 바꾼 값 \\
+\texttt{beta\_true} & \(h_{\mathrm{true}}\)에서 계산한 정답 \(\beta\) \\
+\texttt{S\_true} & \(q_{0,\mathrm{true}}\)에서 계산한 정답 \(S\) \\
+\texttt{beta guess} & 학습 전 모델의 \(\beta\) 초기값 \\
+\texttt{S guess} & 학습 전 모델의 \(S\) 초기값 \\
+\texttt{PDE loss} & PDE residual 오차 \\
+\texttt{IC loss} & 초기조건 오차 \\
+\texttt{BC loss} & 단열 경계조건 오차 \\
+\texttt{Data loss} & sensor data 오차 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{현재 코드의 한계}
+
+현재 코드가 아직 하지 않는 것
+
+\begin{enumerate}[leftmargin=2em]
+\item optimizer를 이용한 실제 학습
+\item full PDE synthetic data 생성
+\item finite difference reference solver
+\item \(\beta\), \(S\)가 true value로 수렴하는지 확인
+\item temperature contour plot
+\item sensor data fitting plot
+\item parameter convergence plot
+\end{enumerate}
+
+가장 중요한 한계는 다음 함수다.
+
+\begin{lstlisting}[language=Python]
+synthetic_theta_no_conduction()
+\end{lstlisting}
+
+이 함수는 아직 전도항을 포함하지 않는다.
+
+\[
+\theta_{XX} \quad \text{is not included yet}
+\]
+
+따라서 최종 reference data generator가 아니라 첫 연결 확인용 synthetic data generator로 봐야 한다.
+
+\section{다음 구현 순서}
+
+추천 순서
+
+\begin{enumerate}[leftmargin=2em]
+\item training loop 추가
+\item total loss weight 정리
+\item \(\beta\), \(S\) 학습이 되는지 짧게 확인
+\item synthetic data generator를 full PDE finite difference solver로 교체
+\item 결과 plot 추가
+\item learned \(\beta\), \(S\)를 \(h\), \(q_0\)로 변환해서 보고
+\end{enumerate}
+
+가장 먼저 볼 코드 지점
+
+\begin{lstlisting}[language=Python]
+# 1. User-defined inputs
+\end{lstlisting}
+
+그 다음 볼 코드 지점
+
+\begin{lstlisting}[language=Python]
+def pde_residual(model, xtau):
+\end{lstlisting}
+
+제안서의 핵심 PDE가 실제로 코드로 들어간 위치이기 때문이다.
+
+\end{document}

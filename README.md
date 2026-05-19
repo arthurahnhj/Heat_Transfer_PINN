@@ -65,6 +65,7 @@ P = 2*pi*Ro
 ## Project References
 
 - `BASELINE.md`: current project memory and implementation direction
+- `docs/PHASE1_CODE_GUIDE.tex`: LaTeX code explanation aligned with the Phase 1 proposal
 - `Phase1/Phase1_Proposal_안형준.pdf`: Phase 1 proposal
 - `2026 MEN310 Final Project.pdf`: final project instruction
 - `2026 MEN310 Final Project_KR.pdf`: Korean final project instruction
@@ -102,4 +103,12 @@ pip install numpy matplotlib scipy torch
 
 ```bash
 python main.py
+```
+
+## Build LaTeX Guide
+
+The LaTeX guide uses Korean text and equations. Build it with XeLaTeX:
+
+```bash
+latexmk -xelatex -outdir=docs/build docs/PHASE1_CODE_GUIDE.tex
 ```

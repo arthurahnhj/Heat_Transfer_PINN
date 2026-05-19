@@ -1,384 +1,517 @@
-"""평판 대류 PINN의 가장 기본 뼈대.
+"""Phase 1 제안서 기준 PINN 기본 틀
 
-이 파일은 아직 완성된 연구 코드가 아닙니다.
-목표는 PINN이 어떤 순서로 생겼는지 아주 쉽게 보는 것입니다.
+주제:
+    로봇 관절 모터 하우징의 1D 비정상 열전달 inverse PINN
+
+이 파일의 목표:
+    아직 최종 학습 코드는 아님
+    Phase 1 제안서에 나온 물리 모델을 코드 뼈대로 옮긴 상태
 
 큰 그림:
-1. 신경망에게 위치 (x, y)를 준다.
-2. 신경망은 그 위치의 무차원 온도 theta를 맞혀 본다.
-3. 그 theta가 열전달 방정식을 잘 만족하는지 검사한다.
-4. 벽면 온도 조건도 잘 맞는지 검사한다.
-5. 나중에는 이 오차들을 줄이도록 학습시킨다.
+    1. 신경망에 위치 X와 시간 tau를 넣음
+    2. 신경망은 무차원 온도 theta(X, tau)를 예측
+    3. 예측한 theta가 열전달 PDE를 만족하는지 검사
+    4. 초기조건, 단열 경계조건, 센서 데이터 조건도 검사
+    5. 나중에 beta와 S를 학습해서 h와 q0를 역추정
 """
 
 from __future__ import annotations
 
-# platform, sys는 지금 내 컴퓨터와 파이썬 정보를 출력할 때 씁니다.
+import math
 import platform
 import sys
 
-# numpy는 일반 숫자 계산에 씁니다.
-# 여기서는 Re, Nu 같은 열전달 값을 계산할 때 사용합니다.
-import numpy as np
-
-# torch는 PINN의 핵심입니다.
-# 신경망을 만들고, 자동미분으로 dtheta/dx 같은 미분값을 구합니다.
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 
 # -------------------------------------------------------------------
-# 1. 물리 문제 설정
-# -------------------------------------------------------------------
-# 우리는 "뜨거운 평판 위로 공기가 지나가는 상황"을 다룹니다.
-#
-# 공기가 왼쪽에서 오른쪽으로 흐른다고 생각하면:
-#
-#   공기 흐름 방향 x ->
-#   --------------------------------  뜨거운 평판
-#
-# y는 평판에서 위쪽으로 떨어진 거리입니다.
+# 1. 사용자가 정하는 입력값 모음
 
-# 평판 표면 온도입니다.
-# 단위는 섭씨(deg C)입니다.
-T_WALL = 75.0
+# -----------------------------
+# 1-1. 형상값
+L = 0.15                        # 모터 하우징 길이 [m]
+R_OUTER = 0.04                  # 외반지름[m]
+R_INNER = 0.025                 # 내반지름[m]
+X0 = 0.30                       # Gaussian heat source 중심 위치 (x0=0.3L 의 무차원 위치)
+SIGMA_X = 0.10                  # Gaussian heat source 폭 (SIGMA_X=0.1L 의 무차원 폭)
+SENSOR_X = (0.25, 0.55, 0.85)   # Sparse temperature sensor 위치
 
-# 멀리 떨어진 공기 온도입니다.
-# 평판에서 충분히 멀면 공기는 이 온도를 가집니다.
-T_INF = 25.0
+# -----------------------------
+# 1-2. 재료 물성치 (알루미늄 합금 물성)
+RHO = 2700.0                    # 밀도 [kg/m^3]         [알루미늄 합금]
+CP = 900.0                      # 비열 [J/(kg*K)]       [알루미늄 합금]
+K = 167.0                       # 열전도율 [W/(m*K)]     [알루미늄 합금]
+T_INF = 25.0                    # 주변 공기 온도 [deg C]
 
-# 공기가 평판 위로 흐르는 속도입니다.
-# 단위는 m/s입니다.
-U_INF = 2.0
+# -----------------------------
+# 1-3. 무차원화 기준값과 해석 시간
+DELTA_T_REF = 50.0              # 온도 무차원화 - 사용자가 지정한 값: 50 deg C [무차원 온도 1은 섭씨 50도에 해당]
+I_REF = 5.0                     # 전류 무차원화 - 사용자가 지정한 값: 5.0 A [무차원 전류 1은 5 A에 해당]
+T_FINAL = 1200.0                # 전체 해석 시간 [s]
 
-# 평판 길이입니다.
-# 단위는 m입니다.
-L = 0.25
-
-# x = 0 바로 앞쪽은 수식이 불안정해질 수 있습니다.
-# 그래서 x = 0에서 바로 시작하지 않고, 조금 뒤에서 시작합니다.
-X_MIN = 0.02 * L
-
-# 계산 영역의 높이입니다.
-# y = 0은 벽면이고, y = Y_MAX는 자유류 쪽 경계라고 생각합니다.
-Y_MAX = 0.02
-
-# 공기의 동점성계수 nu입니다.
-# 쉽게 말하면 "공기가 얼마나 끈적하게 움직이는가"와 관련된 값입니다.
-NU = 1.568e-5
-
-# Prandtl number입니다.
-# 운동량 경계층과 열 경계층의 상대적인 두께를 알려주는 무차원 수입니다.
-PR = 0.71
-
-# 열확산계수 alpha입니다.
-# 열이 공기 안에서 얼마나 잘 퍼지는지 나타냅니다.
-# Pr = nu / alpha 이므로 alpha = nu / Pr 입니다.
-ALPHA = NU / PR
+# -----------------------------
+# 1-4. Synthetic data용 true parameter
+H_TRUE = 40.0                   # 대류 열전달계수 [W/(m^2*K)]
+Q0_TRUE = 8.0e4                 # Joule heating coefficient [W/(m^3*A^2)]
 
 
 # -------------------------------------------------------------------
-# 2. 신경망 만들기
-# -------------------------------------------------------------------
-class ThermalPINN(nn.Module):
-    """위치 (x, y)를 넣으면 온도 theta를 예측하는 작은 신경망."""
+# 2. 위 입력값으로부터 자동 계산되는 값들 (수정안함)
+ALPHA = K / (RHO * CP)                      # 열확산계수 alpha = k / (rho*cp)
+AREA = math.pi * (R_OUTER**2 - R_INNER**2)  # 유효 단면적 A = pi*(Ro^2 - Ri^2) (축방향 전도에 쓰이는 면적)
+PERIMETER = 2.0 * math.pi * R_OUTER         # 외부 대류 둘레 P = 2*pi*Ro
+TAU_FINAL = ALPHA * T_FINAL / L**2          # 실제 시간 t를 무차원 시간 tau로 바꾼 최종 시간
 
-    def __init__(self) -> None:
-        # nn.Module을 상속받는 클래스에서는 이 줄이 필요합니다.
-        # "부모 클래스의 기본 준비를 먼저 해라"라는 뜻입니다.
-        super().__init__()
-
-        # nn.Sequential은 여러 층을 순서대로 쌓는 도구입니다.
-        #
-        # 입력:
-        #   x, y 두 개 숫자
-        #
-        # 출력:
-        #   theta 한 개 숫자
-        #
-        # theta는 무차원 온도입니다.
-        #
-        #   theta = 1  -> 벽면 온도 T_WALL
-        #   theta = 0  -> 자유류 온도 T_INF
-        self.net = nn.Sequential(
-            # 첫 번째 Linear 층입니다.
-            # 숫자 2개(x, y)를 받아서 숫자 32개로 바꿉니다.
-            nn.Linear(2, 32),
-
-            # Tanh는 신경망이 부드러운 곡선을 만들 수 있게 해줍니다.
-            # PINN은 미분을 많이 쓰므로 부드러운 함수가 좋습니다.
-            nn.Tanh(),
-
-            # 두 번째 Linear 층입니다.
-            # 숫자 32개를 다시 숫자 32개로 바꿉니다.
-            nn.Linear(32, 32),
-
-            # 다시 Tanh를 넣어 신경망이 더 복잡한 모양을 배울 수 있게 합니다.
-            nn.Tanh(),
-
-            # 마지막 Linear 층입니다.
-            # 숫자 32개를 최종 출력 theta 1개로 바꿉니다.
-            nn.Linear(32, 1),
-        )
-
-    def forward(self, xy: torch.Tensor) -> torch.Tensor:
-        """신경망에 (x, y)를 넣고 theta를 받는 함수."""
-
-        # PyTorch에서는 model(xy)를 부르면 내부적으로 forward가 실행됩니다.
-        return self.net(xy)
+# 무차원 PDE:
+#   dtheta/dtau = d2theta/dX2 - beta*theta + S*i(tau)^2*g(X)
+# 왼쪽으로 모두 넘기면 residual은:
+#   f = theta_tau - theta_XX + beta*theta - S*i(tau)^2*g(X)
+# PINN은 이 f가 0에 가까워지도록 학습
 
 
 # -------------------------------------------------------------------
-# 3. 계산할 점들 뽑기
+# 3. 차원/무차원 변환 함수
 # -------------------------------------------------------------------
-# PINN은 격자 전체를 반드시 만들 필요가 없습니다.
-# 대신 계산 영역 안에서 점들을 여러 개 랜덤으로 뽑고,
-# 그 점들에서 물리 방정식이 맞는지 검사합니다.
+def tau_from_time(t_seconds: float | torch.Tensor) -> float | torch.Tensor:
+    """실제 시간 t [s] --> 무차원 시간 tau"""
+    return ALPHA * t_seconds / L**2
 
 
-def sample_interior_points(n_points: int, device: torch.device) -> torch.Tensor:
-    """평판 위 공기 영역 내부의 점들을 랜덤으로 뽑습니다."""
-
-    # torch.rand(n_points, 2)는 0과 1 사이의 랜덤 숫자를 만듭니다.
-    #
-    # 모양은 다음과 같습니다.
-    #
-    #   [[x 후보, y 후보],
-    #    [x 후보, y 후보],
-    #    ...]
-    #
-    # 아직 실제 길이 단위가 아니라 0~1 사이 숫자입니다.
-    xy = torch.rand(n_points, 2, device=device)
-
-    # 첫 번째 열은 x 좌표로 씁니다.
-    # 0~1 사이 숫자를 X_MIN~L 사이 숫자로 바꿉니다.
-    xy[:, 0] = X_MIN + (L - X_MIN) * xy[:, 0]
-
-    # 두 번째 열은 y 좌표로 씁니다.
-    # 0~1 사이 숫자를 0~Y_MAX 사이 숫자로 바꿉니다.
-    xy[:, 1] = Y_MAX * xy[:, 1]
-
-    return xy
+def time_from_tau(tau: torch.Tensor) -> torch.Tensor:
+    """무차원 시간 tau --> 실제 시간 t [s]"""
+    return tau * L**2 / ALPHA
 
 
-def sample_wall_points(n_points: int, device: torch.device) -> torch.Tensor:
-    """뜨거운 벽면 y = 0 위의 점들을 랜덤으로 뽑습니다."""
-
-    # x는 X_MIN부터 L까지 랜덤으로 뽑습니다.
-    x = X_MIN + (L - X_MIN) * torch.rand(n_points, 1, device=device)
-
-    # 벽면은 y = 0이므로 y는 전부 0입니다.
-    y = torch.zeros_like(x)
-
-    # x와 y를 옆으로 붙여서 (x, y) 점으로 만듭니다.
-    return torch.cat([x, y], dim=1)
+def beta_from_physical_h(h_value: float | torch.Tensor) -> float | torch.Tensor:
+    """실제 h --> 무차원 beta       [  beta = h*P*L^2/(k*A)  ]"""
+    return h_value * PERIMETER * L**2 / (K * AREA)
 
 
-def sample_freestream_points(n_points: int, device: torch.device) -> torch.Tensor:
-    """평판에서 멀리 떨어진 위쪽 경계 y = Y_MAX의 점들을 뽑습니다."""
+def s_from_physical_q0(q0_value: float | torch.Tensor) -> float | torch.Tensor:
+    """실제 q0 --> 무차원 S         [  S = q0*I_ref^2*L^2/(k*DeltaT_ref)  ]"""
+    return q0_value * I_REF**2 * L**2 / (K * DELTA_T_REF)
 
-    # x는 X_MIN부터 L까지 랜덤으로 뽑습니다.
-    x = X_MIN + (L - X_MIN) * torch.rand(n_points, 1, device=device)
 
-    # 위쪽 경계는 y = Y_MAX입니다.
-    y = Y_MAX * torch.ones_like(x)
-
-    # x와 y를 붙여서 (x, y) 점으로 만듭니다.
-    return torch.cat([x, y], dim=1)
+# Synthetic data에 들어갈 진짜 무차원 파라미터
+BETA_TRUE = beta_from_physical_h(H_TRUE)
+S_TRUE = s_from_physical_q0(Q0_TRUE)
 
 
 # -------------------------------------------------------------------
-# 4. PINN에서 가장 중요한 부분: 물리 방정식 오차
+# 4. 기본 함수들
 # -------------------------------------------------------------------
-def energy_residual(model: ThermalPINN, xy: torch.Tensor) -> torch.Tensor:
-    """열전달 에너지 방정식이 얼마나 안 맞는지 계산합니다.
+def gaussian_heat_source(x: torch.Tensor) -> torch.Tensor:
+    """g(X)를 계산
+    g(X)는 열이 어디에서 많이 생기는지 알려주는 함수
+    X = 0.3 근처:
+        winding 근처라서 Joule heating이 큼
+    X = 0.85 근처:
+        heat source에서 멀어서 Joule heating이 거의 없음 """
+    return torch.exp(-((x - X0) ** 2) / (2.0 * SIGMA_X**2))     # Gaussian 함수
 
-    지금은 가장 쉬운 출발 버전입니다.
 
-    현재 임시 방정식:
+def current_profile(tau: torch.Tensor) -> torch.Tensor:
+    """무차원 전류 i(tau)를 만듦
+    사용자가 지정한 current profile:
+        두 번 켜고 끄는 duty cycle
+    현재 구현:
+        0~300 s      on
+        300~600 s    off
+        600~900 s    on
+        900~1200 s   off
+    on 구간:
+        Joule heating이 켜짐
+    off 구간:
+        I(t) = 0 이라서 Joule heating이 사라지고 냉각만 남음
+    이 on/off 구조가 있어야 q0와 h를 분리해서 추정하기 쉬워짐 """
+    t_seconds = time_from_tau(tau)
+    first_on = (t_seconds >= 0.0) & (t_seconds < 300.0)
+    second_on = (t_seconds >= 600.0) & (t_seconds < 900.0)
+    is_on = first_on | second_on
+    return torch.where(is_on, torch.ones_like(tau), torch.zeros_like(tau))
 
-        U_inf * dtheta/dx = alpha * d2theta/dy2
 
-    말로 풀면:
+def physical_h_from_beta(beta: torch.Tensor) -> torch.Tensor:
+    """무차원 beta를 실제 h [W/(m^2*K)]로 바꿈
+    beta = h*P*L^2/(k*A)    -->    h = beta*k*A/(P*L^2) """
+    return beta * K * AREA / (PERIMETER * L**2)
 
-        "공기가 오른쪽으로 열을 데려가는 효과"
-        =
-        "열이 위아래 방향으로 퍼지는 효과"
 
-    나중에 더 정확하게 만들면 다음 식이 됩니다.
+def physical_q0_from_s(s_value: torch.Tensor) -> torch.Tensor:
+    """무차원 S를 실제 q0로 바꿈
+    S = q0*I_ref^2*L^2/(k*DeltaT_ref)   -->   q0 = S*k*DeltaT_ref/(I_ref^2*L^2) """
+    return s_value * K * DELTA_T_REF / (I_REF**2 * L**2)
 
-        u dtheta/dx + v dtheta/dy = alpha d2theta/dy2
 
-    여기서 u, v는 Blasius 해로부터 얻을 속도장입니다.
+def synthetic_theta_no_conduction(x: torch.Tensor, tau: torch.Tensor) -> torch.Tensor:
+    """Synthetic sensor data를 먼저 만들기 위한 간단한 온도 함수
+
+    주의:
+        이것은 최종 정답 solver가 아님
+        아직 1D 전도항 theta_XX를 포함한 full reference solver가 없음
+
+    지금 하는 일:
+        각 센서 위치에서 local heating/cooling ODE만 풀어서
+        synthetic data의 첫 버전을 만듦
+
+    사용한 단순 모델:
+        dtheta/dtau = -beta_true*theta + S_true*i(tau)^2*g(X)
+
+    나중에 업그레이드:
+        finite difference solver로 full PDE synthetic data를 만들면 됨
     """
 
-    # xy를 복사한 뒤 requires_grad_(True)를 켭니다.
-    #
-    # 이유:
-    #   PINN은 theta를 x, y로 미분해야 합니다.
-    #   PyTorch에게 "이 입력값에 대한 미분을 나중에 계산해줘"라고 알려주는 줄입니다.
-    xy = xy.clone().detach().requires_grad_(True)
+    beta = torch.as_tensor(BETA_TRUE, dtype=x.dtype, device=x.device)
+    s_value = torch.as_tensor(S_TRUE, dtype=x.dtype, device=x.device)
+    source = s_value * gaussian_heat_source(x)
 
-    # 신경망이 각 점에서 theta를 예측합니다.
-    theta = model(xy)
+    tau_300 = torch.as_tensor(tau_from_time(300.0), dtype=x.dtype, device=x.device)
+    tau_600 = torch.as_tensor(tau_from_time(600.0), dtype=x.dtype, device=x.device)
+    tau_900 = torch.as_tensor(tau_from_time(900.0), dtype=x.dtype, device=x.device)
 
-    # theta를 x와 y에 대해 한 번 미분합니다.
-    #
-    # 결과 grad_theta의 모양:
-    #   첫 번째 열: dtheta/dx
-    #   두 번째 열: dtheta/dy
-    grad_theta = torch.autograd.grad(
-        theta,
-        xy,
-        grad_outputs=torch.ones_like(theta),
-        create_graph=True,
-    )[0]
+    theta = torch.zeros_like(tau)
 
-    # dtheta/dx입니다.
-    theta_x = grad_theta[:, 0:1]
+    # 1구간: 0~300 s, 전류 on
+    mask_1 = tau < tau_300
+    theta_1 = (source / beta) * (1.0 - torch.exp(-beta * tau))
+    theta = torch.where(mask_1, theta_1, theta)
 
-    # dtheta/dy입니다.
-    theta_y = grad_theta[:, 1:2]
+    # 300초 끝의 온도
+    theta_300 = (source / beta) * (1.0 - torch.exp(-beta * tau_300))
 
-    # dtheta/dy를 다시 y에 대해 미분해서 d2theta/dy2를 구합니다.
-    #
-    # 즉:
-    #   theta_y  = dtheta/dy
-    #   theta_yy = d2theta/dy2
-    grad_theta_y = torch.autograd.grad(
-        theta_y,
-        xy,
-        grad_outputs=torch.ones_like(theta_y),
-        create_graph=True,
-    )[0]
+    # 2구간: 300~600 s, 전류 off
+    mask_2 = (tau >= tau_300) & (tau < tau_600)
+    theta_2 = theta_300 * torch.exp(-beta * (tau - tau_300))
+    theta = torch.where(mask_2, theta_2, theta)
 
-    # 두 번째 열이 y에 대한 미분입니다.
-    theta_yy = grad_theta_y[:, 1:2]
+    # 600초 시작 온도
+    theta_600 = theta_300 * torch.exp(-beta * (tau_600 - tau_300))
 
-    # 방정식을 왼쪽 - 오른쪽 형태로 씁니다.
-    #
-    # 원래 식:
-    #   U_inf * theta_x = alpha * theta_yy
-    #
-    # residual:
-    #   U_inf * theta_x - alpha * theta_yy
-    #
-    # residual이 0에 가까우면 물리 방정식을 잘 만족한다는 뜻입니다.
-    return U_INF * theta_x - ALPHA * theta_yy
+    # 3구간: 600~900 s, 전류 on
+    mask_3 = (tau >= tau_600) & (tau < tau_900)
+    tau_since_600 = tau - tau_600
+    theta_3 = (
+        theta_600 * torch.exp(-beta * tau_since_600)
+        + (source / beta) * (1.0 - torch.exp(-beta * tau_since_600))
+    )
+    theta = torch.where(mask_3, theta_3, theta)
 
+    # 900초 끝의 온도
+    tau_since_600_end = tau_900 - tau_600
+    theta_900 = (
+        theta_600 * torch.exp(-beta * tau_since_600_end)
+        + (source / beta) * (1.0 - torch.exp(-beta * tau_since_600_end))
+    )
 
-def boundary_loss(model: ThermalPINN, device: torch.device) -> torch.Tensor:
-    """경계조건이 얼마나 안 맞는지 계산합니다.
+    # 4구간: 900~1200 s, 전류 off
+    mask_4 = tau >= tau_900
+    theta_4 = theta_900 * torch.exp(-beta * (tau - tau_900))
+    theta = torch.where(mask_4, theta_4, theta)
 
-    경계조건은 문제의 약속입니다.
-
-    벽면 y = 0:
-        평판이 뜨거우므로 theta = 1
-
-    위쪽 y = Y_MAX:
-        평판에서 멀리 떨어진 공기는 차가우므로 theta = 0
-    """
-
-    # 벽면 점들을 뽑습니다.
-    wall_xy = sample_wall_points(64, device)
-
-    # 위쪽 자유류 경계 점들을 뽑습니다.
-    far_xy = sample_freestream_points(64, device)
-
-    # 벽면에서는 theta가 1이어야 합니다.
-    # 예측값 model(wall_xy)가 1에서 멀어질수록 loss가 커집니다.
-    wall_loss = torch.mean((model(wall_xy) - 1.0) ** 2)
-
-    # 위쪽 경계에서는 theta가 0이어야 합니다.
-    # 예측값 model(far_xy)가 0에서 멀어질수록 loss가 커집니다.
-    far_loss = torch.mean(model(far_xy) ** 2)
-
-    # 두 경계조건 오차를 더합니다.
-    return wall_loss + far_loss
+    return theta
 
 
 def select_device() -> torch.device:
-    """계산을 어디서 할지 고릅니다."""
+    """계산 장치를 고름
 
-    # NVIDIA GPU가 있으면 cuda를 씁니다.
-    # 나중에 데스크탑 RTX GPU에서 돌릴 때 여기가 선택됩니다.
+    데스크탑 NVIDIA GPU에서는 cuda,
+    Mac에서 MPS가 가능하면 mps,
+    아니면 CPU를 사용
+    """
+
     if torch.cuda.is_available():
         return torch.device("cuda")
-
-    # Mac GPU를 쓸 수 있으면 mps를 씁니다.
-    # 지금 환경에서는 False일 수 있습니다. 그래도 코드는 준비해둡니다.
     if torch.backends.mps.is_available():
         return torch.device("mps")
-
-    # GPU를 못 쓰면 CPU로 계산합니다.
-    # 초반 작은 테스트는 CPU로도 충분합니다.
     return torch.device("cpu")
 
 
 # -------------------------------------------------------------------
-# 5. 실행 확인용 main 함수
+# 5. 신경망
+# -------------------------------------------------------------------
+class MotorHousingPINN(nn.Module):
+    """theta(X, tau), beta, S를 함께 다루는 PINN 모델."""
+
+    def __init__(self) -> None:
+        super().__init__()
+
+        # 입력은 2개
+        #   X   : 무차원 위치
+        #   tau : 무차원 시간
+        #
+        # 출력은 1개
+        #   theta : 무차원 온도
+        self.net = nn.Sequential(
+            nn.Linear(2, 32),
+            nn.Tanh(),
+            nn.Linear(32, 32),
+            nn.Tanh(),
+            nn.Linear(32, 32),
+            nn.Tanh(),
+            nn.Linear(32, 1),
+        )
+
+        # beta와 S는 inverse problem에서 찾아야 할 미지수
+        #
+        # 바로 beta를 학습시키지 않고 raw_beta를 학습시킨 뒤,
+        # softplus(raw_beta)를 beta로 사용
+        #
+        # 이유:
+        #   h, q0, beta, S는 물리적으로 음수가 되면 이상함
+        #   softplus를 쓰면 항상 양수로 만들 수 있음
+        self.raw_beta = nn.Parameter(torch.tensor(0.0))
+        self.raw_s = nn.Parameter(torch.tensor(0.0))
+
+    def forward(self, xtau: torch.Tensor) -> torch.Tensor:
+        """신경망에 (X, tau)를 넣어 theta를 예측."""
+
+        return self.net(xtau)
+
+    def beta(self) -> torch.Tensor:
+        """항상 양수인 beta를 반환."""
+
+        return F.softplus(self.raw_beta)
+
+    def s_value(self) -> torch.Tensor:
+        """항상 양수인 S를 반환."""
+
+        return F.softplus(self.raw_s)
+
+
+# -------------------------------------------------------------------
+# 6. 점 샘플링
+# -------------------------------------------------------------------
+def sample_collocation_points(n_points: int, device: torch.device) -> torch.Tensor:
+    """PDE를 검사할 내부 점들을 뽑음
+
+    X:
+        0~1 사이
+
+    tau:
+        0~TAU_FINAL 사이
+    """
+
+    xtau = torch.rand(n_points, 2, device=device)
+    xtau[:, 1] = TAU_FINAL * xtau[:, 1]
+    return xtau
+
+
+def sample_initial_points(n_points: int, device: torch.device) -> torch.Tensor:
+    """초기조건을 검사할 점들을 뽑음
+
+    초기조건은 tau = 0에서 theta = 0.
+    """
+
+    x = torch.rand(n_points, 1, device=device)
+    tau = torch.zeros_like(x)
+    return torch.cat([x, tau], dim=1)
+
+
+def sample_boundary_points(n_points: int, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+    """양쪽 끝단 X=0, X=1의 경계 점들을 뽑음
+
+    제안서의 경계조건은 adiabatic
+
+    즉:
+        dtheta/dX(0, tau) = 0
+        dtheta/dX(1, tau) = 0
+    """
+
+    tau = TAU_FINAL * torch.rand(n_points, 1, device=device)
+    left = torch.cat([torch.zeros_like(tau), tau], dim=1)
+    right = torch.cat([torch.ones_like(tau), tau], dim=1)
+    return left, right
+
+
+def make_synthetic_sensor_data(device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+    """사용자가 지정한 조건으로 synthetic sensor data를 먼저 만듦
+
+    센서 위치:
+        X = 0.25, 0.55, 0.85
+
+    시간:
+        0~1200 s
+
+    현재 synthetic data 생성 방식:
+        전도항을 뺀 local ODE 근사
+    """
+
+    n_time = 41
+    sensor_x = torch.tensor(SENSOR_X, dtype=torch.float32, device=device).reshape(-1, 1)
+    tau_line = torch.linspace(0.0, TAU_FINAL, n_time, device=device).reshape(1, -1)
+
+    x_grid = sensor_x.repeat(1, n_time).reshape(-1, 1)
+    tau_grid = tau_line.repeat(len(SENSOR_X), 1).reshape(-1, 1)
+
+    xtau = torch.cat([x_grid, tau_grid], dim=1)
+    theta_sensor = synthetic_theta_no_conduction(x_grid, tau_grid)
+    return xtau, theta_sensor
+
+
+# -------------------------------------------------------------------
+# 7. 자동미분 도우미
+# -------------------------------------------------------------------
+def gradient(output: torch.Tensor, inputs: torch.Tensor) -> torch.Tensor:
+    """output을 inputs로 미분
+
+    PINN은 신경망 출력 theta를 X와 tau로 미분해야 함
+    이때 PyTorch 자동미분을 사용
+    """
+
+    return torch.autograd.grad(
+        output,
+        inputs,
+        grad_outputs=torch.ones_like(output),
+        create_graph=True,
+    )[0]
+
+
+# -------------------------------------------------------------------
+# 8. Loss 함수들
+# -------------------------------------------------------------------
+def pde_residual(model: MotorHousingPINN, xtau: torch.Tensor) -> torch.Tensor: ##pde_residual이 0에 가까워지면 학습이 잘 되는 것
+    """Phase 1 제안서의 무차원 PDE residual을 계산
+
+    무차원 PDE:
+
+        theta_tau = theta_XX - beta*theta + S*i(tau)^2*g(X)
+
+    residual:
+
+        f = theta_tau - theta_XX + beta*theta - S*i(tau)^2*g(X)
+
+    f가 0에 가까우면 물리 방정식을 잘 만족한다는 뜻
+    """
+
+    xtau = xtau.clone().detach().requires_grad_(True)
+
+    theta = model(xtau)
+    grad_theta = gradient(theta, xtau)
+
+    theta_x = grad_theta[:, 0:1]
+    theta_tau = grad_theta[:, 1:2]
+
+    grad_theta_x = gradient(theta_x, xtau)
+    theta_xx = grad_theta_x[:, 0:1]
+
+    x = xtau[:, 0:1]
+    tau = xtau[:, 1:2]
+
+    beta = model.beta()
+    s_value = model.s_value()
+    i_tau = current_profile(tau)
+    g_x = gaussian_heat_source(x)
+
+    return theta_tau - theta_xx + beta * theta - s_value * (i_tau**2) * g_x
+
+
+def pde_loss(model: MotorHousingPINN, device: torch.device) -> torch.Tensor:
+    """PDE residual의 제곱 평균."""
+
+    xtau = sample_collocation_points(256, device)
+    residual = pde_residual(model, xtau)
+    return torch.mean(residual**2)
+
+
+def initial_condition_loss(model: MotorHousingPINN, device: torch.device) -> torch.Tensor:
+    """초기조건 theta(X, 0) = 0 loss."""
+
+    xtau = sample_initial_points(128, device)
+    theta = model(xtau)
+    return torch.mean(theta**2)
+
+
+def boundary_condition_loss(model: MotorHousingPINN, device: torch.device) -> torch.Tensor:
+    """양끝 단열조건 dtheta/dX = 0 loss."""
+
+    left, right = sample_boundary_points(128, device)
+    left = left.clone().detach().requires_grad_(True)
+    right = right.clone().detach().requires_grad_(True)
+
+    theta_left = model(left)
+    theta_right = model(right)
+
+    theta_x_left = gradient(theta_left, left)[:, 0:1]
+    theta_x_right = gradient(theta_right, right)[:, 0:1]
+
+    left_loss = torch.mean(theta_x_left**2)
+    right_loss = torch.mean(theta_x_right**2)
+    return left_loss + right_loss
+
+
+def sensor_data_loss(
+    model: MotorHousingPINN,
+    sensor_xtau: torch.Tensor,
+    sensor_theta: torch.Tensor,
+) -> torch.Tensor:
+    """센서 데이터와 신경망 예측값의 차이를 계산."""
+
+    theta_pred = model(sensor_xtau)
+    return torch.mean((theta_pred - sensor_theta) ** 2)
+
+
+# -------------------------------------------------------------------
+# 9. 실행 확인
 # -------------------------------------------------------------------
 def main() -> None:
-    """아직 학습은 하지 않고, 기본 계산이 되는지만 확인합니다."""
+    """아직 오래 학습하지 않고, Phase 1 구조가 돌아가는지만 확인."""
 
-    # 사용할 계산 장치를 고릅니다.
     device = select_device()
-
-    # 랜덤 숫자를 항상 비슷하게 나오게 고정합니다.
-    # 이렇게 하면 실행할 때마다 결과가 너무 달라지지 않습니다.
     torch.manual_seed(0)
 
-    # Reynolds number입니다.
-    #
-    # Re_L이 작으면 층류, 너무 커지면 난류가 될 수 있습니다.
-    # 우리는 laminar flat plate만 다룰 것이므로 Re_L < 5e5를 목표로 합니다.
-    re_l = U_INF * L / NU
+    model = MotorHousingPINN().to(device)
 
-    # 교과서의 평균 Nusselt number correlation입니다.
-    #
-    # Nu_L = 0.664 * Re_L^(1/2) * Pr^(1/3)
-    #
-    # 나중에 PINN 결과와 비교할 기준값입니다.
-    nu_l_corr = 0.664 * np.sqrt(re_l) * PR ** (1.0 / 3.0)
+    loss_pde = pde_loss(model, device)
+    loss_ic = initial_condition_loss(model, device)
+    loss_bc = boundary_condition_loss(model, device)
 
-    # 신경망 모델을 만들고 선택한 장치로 보냅니다.
-    model = ThermalPINN().to(device)
+    sensor_xtau, sensor_theta = make_synthetic_sensor_data(device)
+    loss_data = sensor_data_loss(model, sensor_xtau, sensor_theta)
 
-    # 계산 영역 내부 점 128개를 뽑습니다.
-    interior_xy = sample_interior_points(128, device)
+    total_loss = loss_pde + loss_ic + loss_bc + loss_data
 
-    # 각 점에서 물리 방정식 residual을 계산합니다.
-    residual = energy_residual(model, interior_xy)
+    beta_guess = model.beta().detach()
+    s_guess = model.s_value().detach()
+    h_guess = physical_h_from_beta(beta_guess)
+    q0_guess = physical_q0_from_s(s_guess)
 
-    # PDE loss입니다.
-    # residual이 0에 가까울수록 물리 방정식을 잘 만족합니다.
-    pde_loss = torch.mean(residual**2)
-
-    # 경계조건 loss입니다.
-    # 벽면 theta = 1, 위쪽 theta = 0을 얼마나 잘 지키는지 봅니다.
-    bc_loss = boundary_loss(model, device)
-
-    # 전체 loss입니다.
-    # 지금은 아주 단순하게 PDE loss와 BC loss를 그냥 더합니다.
-    total_loss = pde_loss + bc_loss
-
-    # 아래 출력들은 "지금 코드가 잘 돌아가는지" 확인하기 위한 정보입니다.
     print(f"Python      : {sys.version.split()[0]}")
     print(f"Platform    : {platform.machine()}")
     print(f"PyTorch     : {torch.__version__}")
     print(f"Device      : {device}")
-    print(f"Re_L        : {re_l:.3e}")
-    print(f"Nu_L corr   : {nu_l_corr:.3f}")
-    print(f"PDE loss    : {pde_loss.item():.3e}")
-    print(f"BC loss     : {bc_loss.item():.3e}")
+    print()
+    print("Phase 1 model")
+    print(f"L           : {L:.3f} m")
+    print(f"T_final     : {T_FINAL:.1f} s")
+    print(f"tau_final   : {TAU_FINAL:.6f}")
+    print(f"A           : {AREA:.6e} m^2")
+    print(f"P           : {PERIMETER:.6e} m")
+    print(f"alpha       : {ALPHA:.6e} m^2/s")
+    print(f"I_ref       : {I_REF:.1f} A")
+    print(f"DeltaT_ref  : {DELTA_T_REF:.1f} deg C")
+    print()
+    print("Synthetic-data true parameters")
+    print(f"h_true      : {H_TRUE:.6f} W/(m^2*K)")
+    print(f"q0_true     : {Q0_TRUE:.6e} W/(m^3*A^2)")
+    print(f"beta_true   : {BETA_TRUE:.6f}")
+    print(f"S_true      : {S_TRUE:.6f}")
+    print(f"sensor data : {sensor_xtau.shape[0]} points")
+    print()
+    print("Trainable inverse parameters")
+    print(f"beta guess  : {beta_guess.item():.6f}")
+    print(f"S guess     : {s_guess.item():.6f}")
+    print(f"h guess     : {h_guess.item():.6f} W/(m^2*K)")
+    print(f"q0 guess    : {q0_guess.item():.6f}")
+    print()
+    print("Smoke-test losses")
+    print(f"PDE loss    : {loss_pde.item():.3e}")
+    print(f"IC loss     : {loss_ic.item():.3e}")
+    print(f"BC loss     : {loss_bc.item():.3e}")
+    print(f"Data loss   : {loss_data.item():.3e}")
     print(f"Total loss  : {total_loss.item():.3e}")
 
 
-# 이 파일을 직접 실행했을 때만 main()을 실행합니다.
-#
-# 예:
-#   python main.py
-#
-# 나중에 다른 파일에서 이 코드를 import할 때는 main()이 자동 실행되지 않습니다.
 if __name__ == "__main__":
     main()

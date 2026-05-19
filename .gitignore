@@ -9,3 +9,5 @@ venv/
 outputs/
 figures/
 checkpoints/
+
+docs/build*/
