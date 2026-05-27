@@ -1,9 +1,9 @@
-This is XeTeX, Version 3.141592653-2.6-0.999998 (TeX Live 2026) (preloaded format=xelatex 2026.5.1)  22 MAY 2026 17:23
+This is XeTeX, Version 3.141592653-2.6-0.999998 (TeX Live 2026) (preloaded format=xelatex 2026.5.1)  22 MAY 2026 17:29
 entering extended mode
  restricted \write18 enabled.
  %&-line parsing enabled.
-**code_guide/PHASE1_DEEPXDE_CODE_GUIDE.tex
-(./code_guide/PHASE1_DEEPXDE_CODE_GUIDE.tex
+**code_guide/FDM_VS_PINN_NOTEBOOK_CODE_GUIDE.tex
+(./code_guide/FDM_VS_PINN_NOTEBOOK_CODE_GUIDE.tex
 LaTeX2e <2025-11-01>
 L3 programming layer <2026-01-19>
 (/usr/local/texlive/2026/texmf-dist/tex/latex/base/article.cls
@@ -416,8 +416,8 @@ Package: listings 2025/11/14 1.11b (Carsten Heinz)
     but found:
         2025/11/14 1.11b (Carsten Heinz)
     so I'm assuming it got fixed.
-(code_guide/build_xe/PHASE1_DEEPXDE_CODE_GUIDE.aux)
-\openout1 = `PHASE1_DEEPXDE_CODE_GUIDE.aux'.
+(code_guide/build_xe/FDM_VS_PINN_NOTEBOOK_CODE_GUIDE.aux)
+\openout1 = `FDM_VS_PINN_NOTEBOOK_CODE_GUIDE.aux'.
 
 LaTeX Font Info:    Checking defaults for OML/cmm/m/it on input line 27.
 LaTeX Font Info:    ... okay on input line 27.
@@ -475,10 +475,10 @@ LaTeX Font Info:    ... okay on input line 27.
 * (1in=72.27pt=25.4mm, 1cm=28.453pt)
 
 Package hyperref Info: Link coloring OFF on input line 27.
-(code_guide/build_xe/PHASE1_DEEPXDE_CODE_GUIDE.out)
-(code_guide/build_xe/PHASE1_DEEPXDE_CODE_GUIDE.out)
+(code_guide/build_xe/FDM_VS_PINN_NOTEBOOK_CODE_GUIDE.out)
+(code_guide/build_xe/FDM_VS_PINN_NOTEBOOK_CODE_GUIDE.out)
 \@outlinefile=\write3
-\openout3 = `PHASE1_DEEPXDE_CODE_GUIDE.out'.
+\openout3 = `FDM_VS_PINN_NOTEBOOK_CODE_GUIDE.out'.
 
 
 Package fontspec Info: 
@@ -607,53 +607,56 @@ LaTeX Font Info:    Font shape `TU/UnBatang.ttf(0)/bx/n' in size <14.4> not ava
 ilable
 (Font)              Font shape `TU/UnBatang.ttf(0)/b/n' tried instead on input 
 line 30.
-
-(/usr/local/texlive/2026/texmf-dist/tex/latex/listings/lstlang1.sty
-File: lstlang1.sty 2025/11/14 1.11b listings language file
-)
-(/usr/local/texlive/2026/texmf-dist/tex/latex/listings/lstlang1.sty
-File: lstlang1.sty 2025/11/14 1.11b listings language file
-) [1
+ [1
 
 ]
 (/usr/local/texlive/2026/texmf-dist/tex/latex/listings/lstlang1.sty
 File: lstlang1.sty 2025/11/14 1.11b listings language file
 )
 LaTeX Font Info:    Font shape `TU/lmtt/bx/n' in size <10> not available
-(Font)              Font shape `TU/lmtt/b/n' tried instead on input line 124.
+(Font)              Font shape `TU/lmtt/b/n' tried instead on input line 109.
 LaTeX Font Info:    Font shape `TU/UnDotum.ttf(1)/bx/n' in size <10> not availa
 ble
 (Font)              Font shape `TU/UnDotum.ttf(1)/b/n' tried instead on input l
-ine 124.
+ine 109.
  [2]
+Overfull \hbox (75.65953pt too wide) in paragraph at lines 181--183
+[]\TU/lmtt/m/n/10.95 args \TU/UnBatang.ttf(0)/m/n/10.95 는 \TU/lmr/m/n/10.95 com
+mand line argument \TU/UnBatang.ttf(0)/m/n/10.95 처 럼 생 긴 설 정 묶 음 이 다. \TU/lmtt/
+m/n/10.95 main_deepxde.py \TU/UnBatang.ttf(0)/m/n/10.95 의 \TU/lmtt/m/n/10.95 bu
+ild_deepxde_model(args)
+ []
+
+
+Overfull \hbox (45.09235pt too wide) in paragraph at lines 192--194
+\TU/UnBatang.ttf(0)/m/n/10.95 다 섯 번 째 셀 은 \TU/lmr/m/n/10.95 Markdown \TU/UnBata
+ng.ttf(0)/m/n/10.95 셀 이 다. 이 셀 은 실 제 학 습 구 현 이 \TU/lmtt/m/n/10.95 main_deepxde.
+py \TU/UnBatang.ttf(0)/m/n/10.95 의 \TU/lmtt/m/n/10.95 build_deepxde_model()
+ []
+
+[3]
 LaTeX Font Info:    Font shape `TU/UnBatang.ttf(0)/bx/n' in size <12> not avail
 able
 (Font)              Font shape `TU/UnBatang.ttf(0)/b/n' tried instead on input 
-line 186.
-
-[3]
-Overfull \hbox (19.41467pt too wide) in paragraph at lines 266--269
-\TU/UnBatang.ttf(0)/m/n/10.95 센 서 데 이 터 는 \TU/lmtt/m/n/10.95 main_deepxde.py \T
-U/UnBatang.ttf(0)/m/n/10.95 안 에 직 접 정 의 된 \TU/lmtt/m/n/10.95 solve_synthetic_th
-eta_finite_difference()
- []
-
-[4] [5] [6] [7] [8] (code_guide/build_xe/PHASE1_DEEPXDE_CODE_GUIDE.aux)
+line 284.
+ [4] [5] [6] [7] [8] [9]
+(code_guide/build_xe/FDM_VS_PINN_NOTEBOOK_CODE_GUIDE.aux)
  ***********
 LaTeX2e <2025-11-01>
 L3 programming layer <2026-01-19>
  ***********
-Package rerunfilecheck Info: File `PHASE1_DEEPXDE_CODE_GUIDE.out' has not chang
-ed.
-(rerunfilecheck)             Checksum: 39AE0E748CDDB474D6009521F0E58DCD;2565.
+Package rerunfilecheck Info: File `FDM_VS_PINN_NOTEBOOK_CODE_GUIDE.out' has not
+ changed.
+(rerunfilecheck)             Checksum: 85210E0F0DD11725450BFDAC3C31897B;4231.
  ) 
 Here is how much of TeX's memory you used:
- 17715 strings out of 468168
- 301767 string characters out of 5432816
- 1040589 words of memory out of 5000000
- 46222 multiletter control sequences out of 15000+600000
- 634762 words of font info for 106 fonts, out of 8000000 for 9000
+ 17636 strings out of 468168
+ 300933 string characters out of 5432816
+ 1140561 words of memory out of 5000000
+ 46143 multiletter control sequences out of 15000+600000
+ 634778 words of font info for 108 fonts, out of 8000000 for 9000
  1348 hyphenation exceptions out of 8191
- 102i,8n,105p,323b,2825s stack positions out of 10000i,1000n,20000p,200000b,200000s
+ 102i,9n,105p,329b,2825s stack positions out of 10000i,1000n,20000p,200000b,200000s
 
-Output written on code_guide/build_xe/PHASE1_DEEPXDE_CODE_GUIDE.pdf (8 pages).
+Output written on code_guide/build_xe/FDM_VS_PINN_NOTEBOOK_CODE_GUIDE.pdf (9 pa
+ges).

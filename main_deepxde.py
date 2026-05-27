@@ -35,9 +35,33 @@ import sys
 # 그래서 deepxde를 import하기 전에 PyTorch backend를 먼저 지정해야 한다.
 os.environ.setdefault("DDE_BACKEND", "pytorch")
 
+# 홈 디렉터리에 Matplotlib cache를 만들 수 없는 환경에서는 DeepXDE import가 매번 느려진다.
+# writable temp directory를 미리 지정해서 font cache 재생성을 줄인다.
+os.environ.setdefault("MPLCONFIGDIR", "/private/tmp/matplotlib-cache")
+
 import numpy as np
 import torch
 from torch.nn import functional as F
+
+
+# -------------------------------------------------------------------
+# 0. DeepXDE / PyTorch device 설정
+
+# DeepXDE 1.15의 PyTorch backend는 Mac에서 MPS가 가능하면
+# import 시점에 torch 기본 device를 mps로 바꾼다.
+# 이 문제는 M1 + VSCode Jupyter 환경에서 Metal GPU stream crash를 만들 수 있다.
+# 그래서 기본값은 CPU 강제 사용으로 둔다.
+# MPS를 실험하고 싶으면 실행 전에 PINN_FORCE_CPU=0으로 바꾸면 된다.
+FORCE_CPU = os.environ.get("PINN_FORCE_CPU", "1") != "0"
+
+if FORCE_CPU:
+    torch.set_default_device("cpu")
+
+    if hasattr(torch.backends, "mps"):
+        def _disable_mps_for_deepxde() -> bool:
+            return False
+
+        torch.backends.mps.is_available = _disable_mps_for_deepxde
 
 
 # 패키지 설치 여부 확인 코드
@@ -47,6 +71,9 @@ except ModuleNotFoundError as exc:
     raise SystemExit(
         "DeepXDE is not installed.\n"
     ) from exc
+
+if FORCE_CPU:
+    torch.set_default_device("cpu")
 
 # -------------------------------------------------------------------
 # 1. 사용자가 정하는 입력값 모음
@@ -85,6 +112,10 @@ ALPHA = K / (RHO * CP)                      # 열확산계수 alpha = k / (rho*c
 AREA = math.pi * (R_OUTER**2 - R_INNER**2)  # 유효 단면적 A = pi*(Ro^2 - Ri^2) (축방향 전도에 쓰이는 면적)
 PERIMETER = 2.0 * math.pi * R_OUTER         # 외부 대류 둘레 P = 2*pi*Ro
 TAU_FINAL = ALPHA * T_FINAL / L**2          # 실제 시간 t를 무차원 시간 tau로 바꾼 최종 시간
+
+# DeepXDE loss 순서:
+#   [PDE, IC, left BC, right BC, sensor data]
+LOSS_WEIGHTS = [1.0, 10.0, 10.0, 10.0, 100.0]
 
 # 무차원 PDE:
 #   dtheta/dtau = d2theta/dX2 - beta*theta + S*i(tau)^2*g(X)
@@ -153,6 +184,15 @@ def current_profile(tau: torch.Tensor) -> torch.Tensor:
     second_on = (t_seconds >= 600.0) & (t_seconds < 900.0)
     is_on = first_on | second_on
     return torch.where(is_on, torch.ones_like(tau), torch.zeros_like(tau))
+
+
+def current_profile_scalar(tau: float) -> float:
+    """finite difference solver에서 쓰는 scalar 버전의 current profile."""
+
+    t_seconds = tau * L**2 / ALPHA
+    first_on = 0.0 <= t_seconds < 300.0
+    second_on = 600.0 <= t_seconds < 900.0
+    return 1.0 if first_on or second_on else 0.0
 
 
 def physical_h_from_beta(beta: torch.Tensor) -> torch.Tensor:
@@ -248,45 +288,56 @@ def solve_synthetic_theta_finite_difference(n_time: int = 41) -> tuple[torch.Ten
         theta_tau = theta_XX - BETA_TRUE*theta + S_TRUE*i(tau)^2*g(X)
     """
 
+    cache_key = n_time
+    if cache_key in SYNTHETIC_FD_CACHE:
+        return SYNTHETIC_FD_CACHE[cache_key]
+
     nx = 101
-    x = torch.linspace(0.0, 1.0, nx, dtype=torch.float32)
-    dx = x[1] - x[0]
+    device = torch.device("cpu")
+    x = torch.linspace(0.0, 1.0, nx, dtype=torch.float32, device=device)
+    dx = float(x[1] - x[0])
     dtau = 0.4 * dx**2
 
-    sensor_tau = torch.linspace(0.0, TAU_FINAL, n_time, dtype=torch.float32)
-    sensor_indices = torch.tensor([round(xs * (nx - 1)) for xs in SENSOR_X], dtype=torch.long)
+    sensor_tau = torch.linspace(0.0, TAU_FINAL, n_time, dtype=torch.float32, device=device)
+    sensor_tau_values = sensor_tau.tolist()
+    sensor_indices = torch.tensor(
+        [round(xs * (nx - 1)) for xs in SENSOR_X],
+        dtype=torch.long,
+        device=device,
+    )
 
-    theta = torch.zeros(nx, dtype=torch.float32)
-    theta_history = torch.zeros(n_time, len(SENSOR_X), dtype=torch.float32)
+    theta = torch.zeros(nx, dtype=torch.float32, device=device)
+    theta_xx = torch.empty_like(theta)
+    theta_history = torch.zeros(n_time, len(SENSOR_X), dtype=torch.float32, device=device)
 
     g_x = gaussian_heat_source(x.reshape(-1, 1)).reshape(-1)
+    source_on = float(S_TRUE) * g_x
+    beta_true = float(BETA_TRUE)
 
     save_idx = 0
     n_steps = math.ceil(TAU_FINAL / dtau)
 
-    for step in range(n_steps + 1):
-        tau_now = step * dtau
+    with torch.no_grad():
+        for step in range(n_steps + 1):
+            tau_now = step * dtau
 
-        while save_idx < n_time and tau_now >= sensor_tau[save_idx]:
-            theta_history[save_idx] = theta[sensor_indices]
-            save_idx += 1
+            while save_idx < n_time and tau_now >= sensor_tau_values[save_idx]:
+                theta_history[save_idx] = theta[sensor_indices]
+                save_idx += 1
 
-        if tau_now >= TAU_FINAL:
-            break
+            if tau_now >= TAU_FINAL:
+                break
 
-        theta_xx = torch.zeros_like(theta)
-        theta_xx[1:-1] = (theta[2:] - 2.0 * theta[1:-1] + theta[:-2]) / dx**2
-        theta_xx[0] = 2.0 * (theta[1] - theta[0]) / dx**2
-        theta_xx[-1] = 2.0 * (theta[-2] - theta[-1]) / dx**2
+            theta_xx[1:-1] = (theta[2:] - 2.0 * theta[1:-1] + theta[:-2]) / dx**2
+            theta_xx[0] = 2.0 * (theta[1] - theta[0]) / dx**2
+            theta_xx[-1] = 2.0 * (theta[-2] - theta[-1]) / dx**2
 
-        tau_tensor = torch.tensor([[tau_now]], dtype=torch.float32)
-        i_tau = current_profile(tau_tensor).reshape(())
-        source = S_TRUE * (i_tau**2) * g_x
+            source = source_on if current_profile_scalar(tau_now) else 0.0
 
-        step_dtau = min(dtau, TAU_FINAL - tau_now)
-        theta = theta + step_dtau * (theta_xx - BETA_TRUE * theta + source)
+            step_dtau = min(dtau, TAU_FINAL - tau_now)
+            theta = theta + step_dtau * (theta_xx - beta_true * theta + source)
 
-    sensor_x = torch.tensor(SENSOR_X, dtype=torch.float32).reshape(-1, 1)
+    sensor_x = torch.tensor(SENSOR_X, dtype=torch.float32, device=device).reshape(-1, 1)
     tau_line = sensor_tau.reshape(1, -1)
 
     x_grid = sensor_x.repeat(1, n_time).reshape(-1, 1)
@@ -295,9 +346,11 @@ def solve_synthetic_theta_finite_difference(n_time: int = 41) -> tuple[torch.Ten
     xtau = torch.cat([x_grid, tau_grid], dim=1)
     theta_sensor = theta_history.T.reshape(-1, 1)
 
+    SYNTHETIC_FD_CACHE[cache_key] = (xtau, theta_sensor)
     return xtau, theta_sensor
 
 
+SYNTHETIC_FD_CACHE: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
 
 # -------------------------------------------------------------------
 # 5. inverse parameter 양수 제약
@@ -327,7 +380,7 @@ def make_synthetic_sensor_data_numpy(n_time: int = 41) -> tuple[np.ndarray, np.n
 
     # full PDE finite difference solver가 sensor 위치/시간과 theta 값을 함께 만든다.
     xtau, theta_sensor = solve_synthetic_theta_finite_difference(n_time)
-    
+
     # Mac MPS를 쓰는 경우 tensor가 mps:0 장치에 올라갈 수 있다.
     # NumPy는 CPU memory만 직접 볼 수 있으므로 cpu()로 옮긴 뒤 numpy()를 호출한다.
     return (
@@ -587,23 +640,26 @@ def main() -> None:
     model.compile(
         "adam",
         lr=args.lr,
-        loss_weights=[1.0, 10.0, 10.0, 10.0, 100.0],
+        loss_weights=LOSS_WEIGHTS,
         external_trainable_variables=[raw_beta, raw_s],
     )
 
     param_printer = PositiveParameterPrinter(raw_beta, raw_s, args.display_every)
 
     model.train(
-    iterations=args.iterations,
-    display_every=args.display_every,
-    callbacks=[param_printer],
-)
-
+        iterations=args.iterations,
+        display_every=args.display_every,
+        callbacks=[param_printer],
+    )
 
     # 선택 사항:
     # Adam 이후 L-BFGS로 loss를 한 번 더 줄이고 싶을 때 --lbfgs 사용
     if args.lbfgs:
-        model.compile("L-BFGS", external_trainable_variables=[raw_beta, raw_s])
+        model.compile(
+            "L-BFGS",
+            loss_weights=LOSS_WEIGHTS,
+            external_trainable_variables=[raw_beta, raw_s],
+        )
         model.train()
 
     # 학습된 inverse parameter 출력
